@@ -64,19 +64,24 @@ OpenHIM → CCE Collector → Kafka → Compliance
 | Component | Description |
 |-----------|-------------|
 | `SubscriptionCallbackController` | `@RestController` — receives PUT/POST callbacks from the FHIR server at `/callback/{resourceType}/**`. Always returns `200 OK` immediately. |
-| `ForwardingEngine` | Parses FHIR metadata, delegates to `ResourceEnricher`, then POSTs enriched JSON to OpenHIM. Single attempt, no retry. |
-| `ResourceEnricher` | Path-based enrichment: locates RelatedPerson via configured `person-identity-reference-paths`, resolves national-id, sets `subject.reference = Patient/<national-id>`. Strict — returns null (skip forward) if any step fails. |
-| `ReferenceResolver` | Fetches RelatedPerson from FHIR server, extracts national-id using configurable match strategies (`use-official`, `type-code`, `system-suffix`). Per-request cache. |
+| `ForwardingEngine` | Parses FHIR metadata, delegates to `ResourceEnrichmentOrchestrator`, then POSTs enriched JSON to OpenHIM. Single attempt, no retry. |
+| `ResourceEnrichmentOrchestrator` | Orchestrates enrichment by running `EnrichmentStrategy` beans in injection order. |
+| `NationalIdEnrichmentStrategy` | Resolves national-id via `NationalIdResolver`, sets `subject.reference`, `patient.reference`, or `identifier[]`. |
+| `PractitionerDisplayEnrichmentStrategy` | Populates Practitioner `display` names from the FHIR server via `PractitionerResolver`. |
+| `LocationEnrichmentStrategy` | Dual-mode location enrichment (organization-path or generic/encounter-based). |
+| `NationalIdResolver` | Walks configured paths to find identity-source references, fetches from FHIR server, applies match strategies (`use-official`, `type-code`, `system-suffix`). |
+| `FhirResourceFetcher` | Shared service for fetching FHIR resources via `GET /{type}/{id}?_elements=fields`. |
 | `SubscriptionRegistrationService` | Manages R4 `Subscription` resources on the FHIR server — creates missing, deletes stale (by owner tag) |
 | `StartupSubscriptionRunner` | `ApplicationRunner` — reconciles subscriptions on startup (create missing, delete stale) |
 | `TokenEndpointAuthService` | Authenticates with token endpoints (custom or OAuth2 Client Credentials) for the FHIR server |
-| `FhirClientFactory` | Creates authenticated HAPI FHIR `IGenericClient` instances (shared by subscription and reference resolution) |
+| `FhirClientFactory` | Creates authenticated HAPI FHIR `IGenericClient` instances (shared by subscription and resolution services) |
 | `EmitterProperties` | `@ConfigurationProperties` — type-safe config for FHIR server, OpenHIM, auth, subscriptions, reference resolution |
 
 ### Design Decisions
 
 - **Stateless** — no database; subscription tracking is in-memory, reconciled from the FHIR server on startup
-- **Patient Subject Resolution** — enriches each resource with `subject.reference = Patient/<national-id>` by resolving the RelatedPerson at a configurable JSON path; strict forwarding (skips if any step fails)
+- **Patient Subject Resolution** — enriches each resource with `subject.reference = Patient/<national-id>` by resolving the identity-source resource at a configurable JSON path; enrichment failures are logged but do not block forwarding
+- **Strategy/Orchestrator pattern** — enrichment is modular: each concern (national-id, practitioner display, location) is an independent `EnrichmentStrategy` bean, run in injection order
 - **Synchronous forwarding** — callbacks are enriched and forwarded synchronously; single attempt, no retry
 - **Server-agnostic** — works with any FHIR R4-compliant server (HAPI FHIR, IBM FHIR, Firely, Google Healthcare API, etc.)
 - **OpenHIM-targeted** — forwards enriched FHIR resources to OpenHIM; CloudEvents wrapping happens in the OpenHIM mediator downstream
@@ -100,13 +105,25 @@ src/main/java/org/openphc/cce/emitter/
 │   └── SubscriptionCallbackController.java   # /callback/** endpoint
 └── service/
     ├── FhirClientFactory.java            # Authenticated HAPI FHIR client creation (shared)
-    ├── ForwardingEngine.java             # Enriches + forwards FHIR JSON to OpenHIM
+    ├── ForwardingEngine.java             # Orchestrates enrichment + forwards FHIR JSON to OpenHIM
     ├── ForwardResult.java                # Forwarding outcome record
-    ├── ReferenceResolver.java            # Resolves RelatedPerson → national-id (multi-strategy + per-request cache)
     ├── RegistrationResult.java           # Subscription registration outcome record
-    ├── ResourceEnricher.java             # Path-based enrichment: locates RelatedPerson, sets Patient subject
     ├── SubscriptionRegistrationService.java  # FHIR Subscription CRUD (startup reconciliation)
-    └── TokenEndpointAuthService.java     # Token endpoint + OAuth2 token fetching
+    ├── TokenEndpointAuthService.java     # Token endpoint + OAuth2 token fetching
+    ├── enrichment/
+    │   ├── EnrichmentStrategy.java       # Strategy interface (enrich)
+    │   ├── EnrichmentContext.java        # Context record (payload, resourceType, resourceId)
+    │   ├── ResourceEnrichmentOrchestrator.java   # Orchestrator: runs strategies in injection order
+    │   ├── NationalIdEnrichmentStrategy.java # National-id resolution
+    │   ├── PractitionerDisplayEnrichmentStrategy.java  # Practitioner display
+    │   └── LocationEnrichmentStrategy.java   # Dual-mode location
+    └── resolver/
+        ├── FhirResourceFetcher.java      # Shared: GET /{type}/{id}?_elements=fields
+        ├── ResolverPathHelper.java       # Static utility: dot-path walking, array fan-out
+        ├── NationalIdResolver.java       # National-id resolution (path + match strategies)
+        ├── PractitionerResolver.java     # Practitioner ref extraction + display fetch
+        ├── OrganizationResolver.java     # Organization ID extraction + display fetch
+        └── LocationResolver.java         # Encounter-based location derivation
 ```
 
 ## Testing
@@ -139,7 +156,7 @@ All integration tests use `@ActiveProfiles("integration-test")` with `applicatio
 # Run integration tests only
 ./gradlew test --tests "org.openphc.cce.emitter.integration.*"
 
-# Run all tests (178 total: 156 unit + 22 integration)
+# Run all tests (189 total: 167 unit + 22 integration)
 ./gradlew test
 ```
 

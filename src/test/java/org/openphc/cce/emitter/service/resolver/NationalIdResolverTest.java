@@ -1,4 +1,4 @@
-package org.openphc.cce.emitter.service;
+package org.openphc.cce.emitter.service.resolver;
 
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
@@ -9,8 +9,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.hl7.fhir.r4.model.Identifier;
 import org.hl7.fhir.r4.model.Patient;
-import org.hl7.fhir.r4.model.Practitioner;
-import org.hl7.fhir.r4.model.RelatedPerson;
 import org.hl7.fhir.r4.model.RelatedPerson;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.openphc.cce.emitter.config.EmitterProperties;
 import org.openphc.cce.emitter.config.EmitterProperties.FhirServerConfig;
 import org.openphc.cce.emitter.config.EmitterProperties.ReferenceResolutionConfig;
+import org.openphc.cce.emitter.service.FhirClientFactory;
 
 import java.util.List;
 
@@ -34,14 +33,10 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for {@link ReferenceResolver}.
- *
- * <p>Verifies all three national-id match strategies plus caching, using
- * fixtures modelled after SPICE and flat-system-name RelatedPerson identifier
- * structures.
+ * Unit tests for {@link NationalIdResolver}.
  */
 @ExtendWith(MockitoExtension.class)
-class ReferenceResolverTest {
+class NationalIdResolverTest {
 
     private static FhirContext fhirContext;
     private static ObjectMapper objectMapper;
@@ -64,8 +59,6 @@ class ReferenceResolverTest {
         lenient().when(fhirClient.read()).thenReturn(readBuilder);
         lenient().when(readBuilder.resource(anyString())).thenReturn(readTyped);
         lenient().when(readTyped.withId(anyString())).thenReturn(readExecutable);
-        // elementsSubset is a varargs method; stub for any String[] to cover both single
-        // ("identifier") and multi ("identifier","link") invocations.
         lenient().when(readExecutable.elementsSubset(any(String[].class))).thenReturn(readExecutable);
     }
 
@@ -78,10 +71,10 @@ class ReferenceResolverTest {
         rr.setNationalIdTypeCode(typeCode);
         rr.setPersonIdentityResourceType("RelatedPerson");
         rr.setPersonIdentityReferencePaths(List.of(
-                "Encounter:participant.individual.reference",
-                "ServiceRequest:performer.reference",
-                "Observation:performer.reference",
-                "Patient:link.other.reference"
+                "Encounter:participant.individual",
+                "ServiceRequest:performer",
+                "Observation:performer",
+                "Patient:link.other"
         ));
         p.setReferenceResolution(rr);
         return p;
@@ -91,8 +84,9 @@ class ReferenceResolverTest {
         when(readExecutable.execute()).thenReturn(resource);
     }
 
-    private ReferenceResolver newResolver(EmitterProperties p) {
-        return new ReferenceResolver(p, fhirContext, fhirClientFactory, objectMapper);
+    private NationalIdResolver newResolver(EmitterProperties p) {
+        FhirResourceFetcher fetcher = new FhirResourceFetcher(p, fhirContext, fhirClientFactory, objectMapper);
+        return new NationalIdResolver(p, fetcher);
     }
 
     @Nested
@@ -114,7 +108,7 @@ class ReferenceResolverTest {
                     .setValue("NID-10001");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("use-official"), "/national-id", "NI"));
 
             assertEquals("NID-10001", resolver.fetchAndExtractNationalId("Patient", "123"));
@@ -128,7 +122,7 @@ class ReferenceResolverTest {
             patient.addIdentifier().setSystem("X").setValue("Y");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("use-official"), "/national-id", "NI"));
 
             assertNull(resolver.fetchAndExtractNationalId("Patient", "123"));
@@ -152,7 +146,7 @@ class ReferenceResolverTest {
                     .setDisplay("National unique individual identifier");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("type-code"), "/national-id", "NI"));
 
             assertEquals("NID-20002", resolver.fetchAndExtractNationalId("Patient", "124"));
@@ -170,7 +164,7 @@ class ReferenceResolverTest {
                     .setCode("PPN");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("type-code"), "/national-id", "PPN"));
 
             assertEquals("P-99999", resolver.fetchAndExtractNationalId("Patient", "124"));
@@ -197,7 +191,7 @@ class ReferenceResolverTest {
                     .setValue("34");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("system-suffix"), "/national-id", "NI"));
 
             assertEquals("NID-1774256338", resolver.fetchAndExtractNationalId("Patient", "616"));
@@ -206,16 +200,13 @@ class ReferenceResolverTest {
         @Test
         @DisplayName("matches flat identifier system (system=\"NID\")")
         void resolvesFlatSystemStyle() {
-            // Some servers use flat system names like "NID" and "UPI"
-            // (no use field, no type.coding).
-            // With suffix="NID", endsWith("NID") matches the NID entry exactly.
             Patient patient = new Patient();
             patient.setId("251119-0001-4106");
             patient.addIdentifier().setSystem("NID").setValue("1192880005226000");
             patient.addIdentifier().setSystem("UPI").setValue("251119-0001-4106");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("system-suffix"), "NID", "NI"));
 
             assertEquals("1192880005226000",
@@ -230,7 +221,7 @@ class ReferenceResolverTest {
             patient.addIdentifier().setSystem("http://spice/fhir/village-id").setValue("34");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(
+            NationalIdResolver resolver = newResolver(
                     props(List.of("system-suffix"), "/national-id", "NI"));
 
             assertNull(resolver.fetchAndExtractNationalId("Patient", "616"));
@@ -241,8 +232,7 @@ class ReferenceResolverTest {
     @DisplayName("Multi-strategy ordering (defaults: use-official → type-code → system-suffix)")
     class MultiStrategyOrdering {
 
-        private final List<String> defaults =
-                List.of("use-official", "type-code", "system-suffix");
+        private final List<String> defaults = List.of("use-official", "type-code", "system-suffix");
 
         @Test
         @DisplayName("falls through to system-suffix for SPICE Patient (no use/type fields)")
@@ -252,7 +242,7 @@ class ReferenceResolverTest {
             patient.addIdentifier().setSystem("http://spice/fhir/national-id").setValue("NID-SPICE");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             assertEquals("NID-SPICE", resolver.fetchAndExtractNationalId("Patient", "616"));
         }
@@ -271,22 +261,22 @@ class ReferenceResolverTest {
                     .setValue("SUFFIX-LOSES");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             assertEquals("OFFICIAL-WINS", resolver.fetchAndExtractNationalId("Patient", "123"));
         }
     }
 
     @Nested
-    @DisplayName("resolveNationalIdFromResource — full resource JSON resolution")
-    class ResolveFromResource {
+    @DisplayName("resolveNationalIdFromPayload — full resource JSON resolution")
+    class ResolveFromPayload {
 
         private final List<String> defaults = List.of("use-official", "type-code", "system-suffix");
 
         @Test
         @DisplayName("identity-source resource (RelatedPerson) — extracts from own identifiers")
         void identitySourceExtractsFromOwnIdentifiers() throws Exception {
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             String json = """
                     {
@@ -304,7 +294,7 @@ class ReferenceResolverTest {
         @Test
         @DisplayName("identity-source resource with no matching identifier — returns null")
         void identitySourceNoMatchingIdentifier() throws Exception {
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             String json = """
                     {
@@ -330,7 +320,7 @@ class ReferenceResolverTest {
                     .setValue("NID-RESOLVED");
             stubReturn(rp);
 
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             String json = """
                     {
@@ -348,7 +338,7 @@ class ReferenceResolverTest {
         @Test
         @DisplayName("other resource — no configured path → returns null")
         void noConfiguredPathReturnsNull() throws Exception {
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             String json = """
                     {
@@ -364,7 +354,7 @@ class ReferenceResolverTest {
         @Test
         @DisplayName("other resource — no identity-source reference at configured path → returns null")
         void noIdentitySourceAtPathReturnsNull() throws Exception {
-            ReferenceResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
+            NationalIdResolver resolver = newResolver(props(defaults, "/national-id", "NI"));
 
             String json = """
                     {
@@ -389,11 +379,10 @@ class ReferenceResolverTest {
             rr.setNationalIdSystemSuffix("/national-id");
             rr.setNationalIdTypeCode("NI");
             rr.setPersonIdentityResourceType("Patient");
-            rr.setPersonIdentityReferencePaths(List.of("Encounter:subject.reference"));
+            rr.setPersonIdentityReferencePaths(List.of("Encounter:subject"));
             p.setReferenceResolution(rr);
 
-            // When resource IS the identity source (Patient), extract from own identifiers
-            ReferenceResolver resolver = newResolver(p);
+            NationalIdResolver resolver = newResolver(p);
 
             String json = """
                     {
@@ -418,7 +407,7 @@ class ReferenceResolverTest {
             rr.setNationalIdSystemSuffix("/national-id");
             rr.setNationalIdTypeCode("NI");
             rr.setPersonIdentityResourceType("Patient");
-            rr.setPersonIdentityReferencePaths(List.of("Encounter:subject.reference"));
+            rr.setPersonIdentityReferencePaths(List.of("Encounter:subject"));
             p.setReferenceResolution(rr);
 
             Patient patient = new Patient();
@@ -429,7 +418,7 @@ class ReferenceResolverTest {
                     .setValue("PAT-NID-616");
             stubReturn(patient);
 
-            ReferenceResolver resolver = newResolver(p);
+            NationalIdResolver resolver = newResolver(p);
 
             String json = """
                     {
@@ -443,76 +432,26 @@ class ReferenceResolverTest {
         }
     }
 
-    // ── Practitioner display name resolution ────────────────────────
-
     @Nested
-    @DisplayName("Practitioner display name fetching")
-    class PractitionerDisplayName {
+    @DisplayName("parsePathConfig utility")
+    class ParsePathConfig {
 
         @Test
-        @DisplayName("extracts display name from name[0].text")
-        void extractsFromNameText() {
-            Practitioner practitioner = new Practitioner();
-            practitioner.setId("12345");
-            practitioner.addName().setText("Dr. Aziz Muhammed");
-            stubReturn(practitioner);
-
-            ReferenceResolver resolver = newResolver(
-                    props(List.of("use-official"), "/national-id", "NI"));
-
-            assertEquals("Dr. Aziz Muhammed", resolver.fetchPractitionerDisplayName("12345"));
+        @DisplayName("parses standard path entries")
+        void parsesStandardEntries() {
+            var result = ResolverPathHelper.parsePathConfig(List.of(
+                    "Encounter:participant.individual",
+                    "ServiceRequest:performer"
+            ));
+            assertEquals(2, result.size());
+            assertEquals("participant.individual", result.get("Encounter"));
+            assertEquals("performer", result.get("ServiceRequest"));
         }
 
         @Test
-        @DisplayName("assembles display name from given + family when text is absent")
-        void assemblesFromGivenAndFamily() {
-            Practitioner practitioner = new Practitioner();
-            practitioner.setId("12345");
-            practitioner.addName().setFamily("Muhammed").addGiven("Aziz");
-            stubReturn(practitioner);
-
-            ReferenceResolver resolver = newResolver(
-                    props(List.of("use-official"), "/national-id", "NI"));
-
-            assertEquals("Aziz Muhammed", resolver.fetchPractitionerDisplayName("12345"));
-        }
-
-        @Test
-        @DisplayName("returns family name only when given is absent")
-        void returnsFamilyOnly() {
-            Practitioner practitioner = new Practitioner();
-            practitioner.setId("12345");
-            practitioner.addName().setFamily("Jean");
-            stubReturn(practitioner);
-
-            ReferenceResolver resolver = newResolver(
-                    props(List.of("use-official"), "/national-id", "NI"));
-
-            assertEquals("Jean", resolver.fetchPractitionerDisplayName("12345"));
-        }
-
-        @Test
-        @DisplayName("returns null when name array is empty")
-        void returnsNullWhenNoName() {
-            Practitioner practitioner = new Practitioner();
-            practitioner.setId("12345");
-            stubReturn(practitioner);
-
-            ReferenceResolver resolver = newResolver(
-                    props(List.of("use-official"), "/national-id", "NI"));
-
-            assertNull(resolver.fetchPractitionerDisplayName("12345"));
-        }
-
-        @Test
-        @DisplayName("returns null when FHIR client throws exception")
-        void returnsNullOnFetchError() {
-            when(readExecutable.execute()).thenThrow(new RuntimeException("Connection timeout"));
-
-            ReferenceResolver resolver = newResolver(
-                    props(List.of("use-official"), "/national-id", "NI"));
-
-            assertNull(resolver.fetchPractitionerDisplayName("12345"));
+        @DisplayName("returns empty map for null input")
+        void returnsEmptyForNull() {
+            assertEquals(0, ResolverPathHelper.parsePathConfig(null).size());
         }
     }
 }

@@ -187,23 +187,23 @@ docker logs fhir-cce-emitter-adaptor | grep "StartupSubscriptionRunner"
 
 **Causes and resolutions:**
 
-1. **Auth failure fetching the FHIR resource** — `ReferenceResolver` uses `FhirClientFactory` with the same `emitter.fhir-server.auth` config as subscription registration. Verify auth is correct (see Section 4.2). Look for FHIR client errors:
+1. **Auth failure fetching the FHIR resource** — `NationalIdResolver` uses `FhirResourceFetcher` (backed by `FhirClientFactory`) with the same `emitter.fhir-server.auth` config as subscription registration. Verify auth is correct (see Section 4.2). Look for FHIR client errors:
    ```bash
-   docker logs fhir-cce-emitter-adaptor | grep "ReferenceResolver"
+   docker logs fhir-cce-emitter-adaptor | grep "NationalIdResolver\|FhirResourceFetcher"
    ```
 
 2. **No configured path for the resource type** — The resource type is not listed in `emitter.reference-resolution.person-identity-reference-paths`. Only resource types with a configured path (and the configured identity-resource type itself) are enriched; all others are forwarded as-is without enrichment. To add a resource type, set `EMITTER_PERSON_IDENTITY_REFERENCE_PATHS` with the appropriate `ResourceType:dot.path` entry and restart.
 
 3. **No identity-source reference at the configured path** — The JSON path configured for the resource type does not contain a `{personIdentityResourceType}/{personReferenceIdentifier}` reference (e.g. `RelatedPerson/499063`) in the actual payload. The `personReferenceIdentifier` is the FHIR resource ID portion of the reference. Verify the FHIR data has the expected reference at the configured path. Enable `DEBUG` logging to see path traversal:
    ```bash
-   docker logs fhir-cce-emitter-adaptor | grep "ReferenceResolver"
+   docker logs fhir-cce-emitter-adaptor | grep "NationalIdResolver\|ResolverPathHelper"
    ```
 
 4. **Identity-resource resource has no national identifier** — None of the configured match strategies (`use-official`, `type-code`, `system-suffix`) found a match in the identity-source resource's `identifier[]` array. Inspect the resource (identified by `personReferenceIdentifier`) directly on the FHIR server.
 
 5. **Wrong match strategy for source server** — The default `use-official,type-code,system-suffix` order works for spec-compliant servers and SPICE. For servers using non-standard or flat identifier systems (e.g., `system: "NID"` with no `use` or `type.coding` fields), override `EMITTER_NATIONAL_ID_SYSTEM_SUFFIX=NID` so the `system-suffix` strategy matches. See [configuration-guide.md](configuration-guide.md#7-reference-resolution-national-id-lookup) for examples.
 
-6. **Stale data after national-id change** — not applicable. `ReferenceResolver` fetches fresh from the FHIR server on every callback, so each notification picks up the latest national-id.
+6. **Stale data after national-id change** — not applicable. `NationalIdResolver` fetches fresh from the FHIR server on every callback via `FhirResourceFetcher`, so each notification picks up the latest national-id.
 
 ### 4.5 Token Expired
 
@@ -350,7 +350,7 @@ The drawback of the current synchronous approach is that the `200 OK` is held un
 **Proposed improvement — fire-and-forget with bounded thread pool:**
 
 1. The controller hands off the raw JSON to a bounded `ThreadPoolTaskExecutor` and **returns `200 OK` immediately** — HAPI FHIR is ACKed before any enrichment or forwarding begins, completely eliminating the redelivery risk.
-2. The async task runs `ResourceEnricher` → `ReferenceResolver` → OpenHIM POST off the HTTP thread.
+2. The async task runs `ResourceEnrichmentOrchestrator` → `ForwardingEngine` → OpenHIM POST off the HTTP thread.
 3. Because the service now controls the retry (HAPI is already ACKed), **exponential backoff retry** can be introduced safely — e.g. up to 3 attempts with `2 s × attempt` backoff — without risking HAPI redelivery loops.
 4. Failures after all retries are logged, metered (`forward.failure` counter), and optionally written to a dead-letter log or alert.
 
@@ -368,7 +368,7 @@ public ResponseEntity<Void> handleCallback(@PathVariable String callbackKey,
 // ForwardingEngine — off-thread with retry
 @Async("callbackExecutor")
 public void submitAsync(String callbackKey, String resourceJson) {
-    String enriched = resourceEnricher.enrichReferences(resourceJson);
+    String enriched = resourceEnrichmentOrchestrator.enrichReferences(context);
     int attempt = 0;
     while (attempt < maxAttempts) {
         try {

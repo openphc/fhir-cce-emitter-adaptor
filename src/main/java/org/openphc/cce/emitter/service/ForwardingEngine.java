@@ -8,6 +8,7 @@ import org.hl7.fhir.instance.model.api.IBaseResource;
 import org.openphc.cce.emitter.config.EmitterProperties;
 import org.openphc.cce.emitter.config.EmitterProperties.OpenhimAuthConfig;
 import org.openphc.cce.emitter.config.EmitterProperties.OpenhimConfig;
+import org.openphc.cce.emitter.service.enrichment.ResourceEnrichmentOrchestrator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -38,7 +39,7 @@ public class ForwardingEngine {
     private final EmitterProperties properties;
     private final RestTemplate restTemplate;
     private final RestTemplate trustAllRestTemplate;
-    private final ResourceEnricher resourceEnricher;
+    private final ResourceEnrichmentOrchestrator enrichmentOrchestrator;
 
     // Metrics
     private final Counter callbacksReceivedCounter;
@@ -51,13 +52,13 @@ public class ForwardingEngine {
                             EmitterProperties properties,
                             RestTemplate restTemplate,
                             @Qualifier("trustAllRestTemplate") RestTemplate trustAllRestTemplate,
-                            ResourceEnricher resourceEnricher,
+                            ResourceEnrichmentOrchestrator enrichmentOrchestrator,
                             MeterRegistry meterRegistry) {
         this.fhirContext = fhirContext;
         this.properties = properties;
         this.restTemplate = restTemplate;
         this.trustAllRestTemplate = trustAllRestTemplate;
-        this.resourceEnricher = resourceEnricher;
+        this.enrichmentOrchestrator = enrichmentOrchestrator;
         this.meterRegistry = meterRegistry;
 
         // Register metrics
@@ -105,7 +106,7 @@ public class ForwardingEngine {
         // Enrich references (e.g. Patient/616 → Patient/<nationalId>).
         // Returns null only for structurally invalid payloads (not a JSON object,
         // blank resourceType). Otherwise returns enriched or original JSON as-is.
-        String payloadToForward = resourceEnricher.enrichReferences(resourceJson);
+        String payloadToForward = enrichmentOrchestrator.enrichReferences(resourceJson);
 
         if (payloadToForward == null) {
             log.info("Skipping forward for {} {} — structurally invalid payload",

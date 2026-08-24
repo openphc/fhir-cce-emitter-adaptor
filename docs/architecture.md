@@ -36,6 +36,7 @@ The FHIR CCE Emitter Adaptor has **six core responsibilities**:
 | 3 | **Parse Metadata** | Parse incoming FHIR JSON to extract resource metadata (type, ID) using HAPI FHIR client library |
 | 4 | **Enrich with National-ID** | Resolve the national-id and place it on the appropriate field based on the resource type's FHIR R4 definition. Three enrichment strategies checked in priority order: (a) **Has `subject` field** (e.g. Encounter, Observation, ServiceRequest): sets `subject.reference = "Patient/<national-id>"`; (b) **Has `patient` field** (e.g. AllergyIntolerance, RelatedPerson, Claim, EpisodeOfCare): sets `patient.reference = "Patient/<national-id>"`; (c) **Neither field** (e.g. Location, Organization, Practitioner): adds `{"system": "<configured-system>", "value": "<national-id>"}` to `identifier[]`. The identifier system URI is configurable via `national-id-identifier-system` (default: `http://openphc.org/identifier/upid`). If national-id resolution fails, the resource is **forwarded as-is without enrichment** (never skipped). Only structurally invalid payloads (not a JSON object, blank `resourceType`) are skipped. |
 | 4b | **Enrich Practitioner Display** | After national-id enrichment, populates the `display` field on Practitioner reference nodes. Uses configurable `practitioner-display-paths` (e.g. `Encounter:participant.individual`) to locate the first `Practitioner/{id}` reference via a recursive JSON path walker. If `display` is absent/blank, fetches `GET /Practitioner/{id}?_elements=name` from the FHIR server and extracts a human-readable name (priority: `name[0].text` → `given + family` → `family` → `given`). Skips silently if no path configured, no Practitioner found, display already present, or fetch fails. |
+| 4c | **Enrich Location** | Populates location fields on resources. Supports two modes: **(a) Organization-path mode** (default) — uses `location-from-organization-paths` (e.g. `Encounter:serviceProvider`, `ServiceRequest:performer`) to find an Organization reference, fetches `GET /Organization/{id}?_elements=name`, and sets the location display name. **(b) Generic mode** — 3-step cascade: (1) if a location reference already exists with a `display` → skip; (2) if a location reference exists without `display` → fetch `GET /Location/{id}?_elements=name` and set the display; (3) **only if no location reference is found in the payload at all** → fall back to the encounter route: find the Encounter reference at the configured path (e.g. `Observation:encounter`), fetch `GET /Encounter/{id}?_elements=location`, extract its location data, and set on the payload. FHIR R4 spec-aware: uses `locationReference[]` for ServiceRequest, `location[]` (BackboneElement) for Encounter. Resources without a location field in FHIR R4 are skipped. Always enabled (like other enrichment strategies). |
 | 5 | **Forward to OpenHIM** | Forward the enriched (or original) FHIR JSON synchronously to OpenHIM with authentication headers (Basic Auth, JWT, Custom Token) — single attempt, no retry; skip forwarding (return `ForwardResult.skipped()`) only when enricher returns `null` (structurally invalid payload) |
 | 6 | **Expose Observability** | Expose Prometheus metrics and Spring Boot Actuator health probes |
 
@@ -235,13 +236,25 @@ src/main/java/org/openphc/cce/emitter/
 │   └── SubscriptionCallbackController.java       # REST-hook callback endpoint (/callback/**)
 └── service/
     ├── FhirClientFactory.java                    # Authenticated HAPI FHIR client creation (shared)
-    ├── ForwardingEngine.java                     # Enriches + forwards FHIR JSON to OpenHIM (single attempt, no retry)
+    │   ├── ForwardingEngine.java                     # Orchestrates enrichment + forwards FHIR JSON to OpenHIM
     ├── ForwardResult.java                        # Forwarding outcome record
     ├── RegistrationResult.java                   # Subscription registration outcome record
-    ├── ReferenceResolver.java                    # Resolves national-id from FHIR resources: path lookup, identity-source detection, fetch, multi-strategy matching; Practitioner display name resolution; Organization display name resolution
-    ├── ResourceEnricher.java                     # Enriches FHIR JSON: subject.reference, patient.reference, OR identifier[] based on resource type; Practitioner display name enrichment; Organization-based Location enrichment
     ├── SubscriptionRegistrationService.java      # FHIR Subscription creation on server (startup-only)
-    └── TokenEndpointAuthService.java             # Token endpoint + OAuth2 token fetching
+    ├── TokenEndpointAuthService.java             # Token endpoint + OAuth2 token fetching
+    ├── enrichment/                               # Strategy/Orchestrator pattern for payload enrichment
+    │   ├── EnrichmentStrategy.java               # Strategy interface (enrich)
+    │   ├── EnrichmentContext.java                # Immutable context record (payload, resourceType, resourceId)
+    │   ├── ResourceEnrichmentOrchestrator.java   # Orchestrator: runs strategies in injection order
+    │   ├── NationalIdEnrichmentStrategy.java     # Resolves national-id → sets subject/patient/identifier[]
+    │   ├── PractitionerDisplayEnrichmentStrategy.java  # Populates Practitioner display names
+    │   └── LocationEnrichmentStrategy.java       # Dual-mode location enrichment (org-path or generic)
+    └── resolver/                                 # FHIR resource resolution services
+        ├── FhirResourceFetcher.java              # Shared service: GET /{type}/{id}?_elements=fields
+        ├── ResolverPathHelper.java               # Static utility: dot-path walking, array fan-out, prefix matching
+        ├── NationalIdResolver.java               # Resolves national-id from payload (path lookup + match strategies)
+        ├── PractitionerResolver.java             # Extracts Practitioner ref nodes + fetches display names
+        ├── OrganizationResolver.java             # Extracts Organization IDs + fetches display names
+        └── LocationResolver.java                 # Extracts Encounter IDs + fetches Location/Encounter data
 ```
 
 ### Test Structure
@@ -252,13 +265,27 @@ src/test/java/org/openphc/cce/emitter/
 ├── config/
 │   └── StartupSubscriptionRunnerTest.java        # Startup auto-subscription tests
 ├── controller/
-│   └── SubscriptionCallbackControllerTest.java   # Callback endpoint tests (8)
+│   └── SubscriptionCallbackControllerTest.java   # Callback endpoint tests
 ├── service/
-│   ├── ForwardingEngineTest.java                 # Forwarding + error handling tests (28)
-│   ├── TokenEndpointAuthServiceTest.java         # Token extraction + caching tests (22)
-│   └── SubscriptionRegistrationServiceTest.java  # Subscription creation + auth tests (13)
+│   ├── ForwardingEngineTest.java                 # Forwarding + error handling tests
+│   ├── FhirClientFactoryTest.java                # Auth client creation tests
+│   ├── TokenEndpointAuthServiceTest.java         # Token extraction + caching tests
+│   ├── SubscriptionRegistrationServiceTest.java  # Subscription CRUD tests
+│   ├── enrichment/
+│   │   └── ResourceEnrichmentOrchestratorTest.java   # Orchestrator enrichment tests
+│   └── resolver/
+│       └── NationalIdResolverTest.java           # National-id resolution tests
 └── integration/
-    └── ...                                       # WireMock-based integration tests (20+)
+    ├── AbstractIntegrationTest.java              # WireMock base class (FHIR + OpenHIM)
+    ├── CallbackForwardIntegrationTest.java       # End-to-end callback → forward tests
+    ├── ErrorHandlingIntegrationTest.java         # Malformed body, ping, error propagation
+    ├── FhirServerOAuth2AuthIntegrationTest.java  # OAuth2 Client Credentials flow
+    ├── FhirServerTokenAuthIntegrationTest.java   # Token-endpoint auth flow
+    ├── HealthEndpointIntegrationTest.java        # Health endpoint test
+    ├── OpenhimBasicAuthIntegrationTest.java      # OpenHIM Basic auth verification
+    ├── OpenhimCustomTokenAuthIntegrationTest.java # OpenHIM Custom Token auth
+    ├── OpenhimJwtAuthIntegrationTest.java        # OpenHIM JWT auth
+    └── StartupSubscriptionIntegrationTest.java   # Startup subscription flow with WireMock
 ```
 
 ---
@@ -276,10 +303,11 @@ This is the primary processing path — the synchronous pipeline from FHIR serve
 | 3 | **SubscriptionCallbackController** | Calls `ForwardingEngine.forward()` synchronously |
 | 4 | **ForwardingEngine** | Increments `callbacks.received` counter |
 | 5 | **ForwardingEngine** | Parses FHIR resource metadata: `fhirContext.newJsonParser().parseResource()` → extract `resourceType` and `resourceId`; falls back to `"Unknown"` on parse failure |
-| 6 | **ResourceEnricher** | Resolves the national-id via `ReferenceResolver.resolveNationalIdFromPayload()`. If resolution fails (returns null), the resource is forwarded as-is without enrichment — **never skipped**. If resolution succeeds, enrichment depends on whether the resource type has a `subject` or `patient` field in FHIR R4 (checked in priority order via HAPI FHIR's `RuntimeResourceDefinition`): (a) **has `subject`**: sets `subject.reference = "Patient/<national-id>"`; (b) **has `patient`**: sets `patient.reference = "Patient/<national-id>"`; (c) **neither**: adds `{"system": "<configured-system>", "value": "<national-id>"}` to `identifier[]`. After national-id enrichment, performs **Practitioner display name enrichment** (see step 6b) and **Organization-based Location enrichment** (see step 6c). Returns `null` (skip forward) only for structurally invalid payloads (not a JSON object, blank `resourceType`). |
-| 6b | **ResourceEnricher** | **Practitioner display enrichment:** Looks up the configured path from `practitioner-display-paths` for this resource type (e.g. `Encounter` → `participant.individual`). Delegates to `ReferenceResolver.extractPractitionerRefNodeAtPath()` which splits the dot-path into segments and recursively walks the JSON tree — a **recursive path walker** that descends through intermediate segments, fans out across JSON arrays, and checks the leaf node for a `Practitioner/{id}` reference. If found and `display` is absent/blank, extracts the Practitioner ID, fetches `GET /Practitioner/{id}?_elements=name` from the FHIR server, extracts a human-readable display name (priority: `name[0].text` → `given + family` → `family` → `given`), and sets `display` on the reference node (mutates the payload in-place). Skips silently if: no path configured, no Practitioner reference found, display already present, or fetch fails. |
-| 6c | **ResourceEnricher** | **Organization-based Location enrichment** (gated by `location-enrichment-enabled`, default `true`): FHIR R4 spec-aware — determines the correct location field for the resource type using HAPI FHIR's `RuntimeResourceDefinition`: checks `locationReference` first (ServiceRequest), then `location` (Encounter BackboneElement). Uses configured `organization-location-paths` (e.g. `Encounter:serviceProvider.reference`, `ServiceRequest:performer.reference`) to locate the Organization reference in the payload. Extracts the Organization ID, fetches `GET /Organization/{id}?_elements=name` from the FHIR server to get its display name, and populates the location field with `{"reference": "Organization/{id}", "display": "<org name>"}`. For ServiceRequest: populates flat `locationReference[]`. For Encounter: populates nested `location[].location`. Resources without a location field in FHIR R4 (e.g. Observation, Condition) or without a configured organization-location path are skipped entirely. |
-| 7 | **ForwardingEngine** | If enricher returns `null` (structurally invalid payload), increments `forward.skipped` counter and returns `ForwardResult.skipped()` — no OpenHIM call. If enricher returns the original JSON (resolution failed) or enriched JSON (resolution succeeded), proceeds to forward. |
+| 6 | **ResourceEnrichmentOrchestrator** | Runs all registered `EnrichmentStrategy` beans in injection order. Each strategy receives an `EnrichmentContext` containing the mutable `ObjectNode` payload, `resourceType`, and `resourceId`. Strategies enrich in-place and operate independently. |
+| 6a | **NationalIdEnrichmentStrategy** (@Order 100) | Resolves the national-id via `NationalIdResolver.resolveNationalIdFromPayload()`. If resolution succeeds, determines whether the resource type has a `subject` or `patient` field (via HAPI FHIR's `RuntimeResourceDefinition`): (a) **has `subject`**: sets `subject.reference = "Patient/<national-id>"`; (b) **has `patient`**: sets `patient.reference = "Patient/<national-id>"`; (c) **neither**: adds `{"system": "<configured-system>", "value": "<national-id>"}` to `identifier[]`. If resolution fails, logs WARN and continues — resource is forwarded as-is without national-id enrichment. |
+| 6b | **PractitionerDisplayEnrichmentStrategy** (@Order 200) | Looks up the configured path from `practitioner-display-paths` for this resource type (e.g. `Encounter` → `participant.individual`). Delegates to `PractitionerResolver.extractPractitionerRefNodeAtPath()` which splits the dot-path into segments and recursively walks the JSON tree with array fan-out to find the first `Practitioner/{id}` reference. If found and `display` is absent/blank, extracts the Practitioner ID, fetches `GET /Practitioner/{id}?_elements=name` via `FhirResourceFetcher`, extracts a human-readable display name (priority: `name[0].text` → `given + family` → `family` → `given`), and sets `display` on the reference node (mutates the payload in-place). Skips silently if: no path configured, no Practitioner reference found, display already present, or fetch fails. |
+| 6c | **LocationEnrichmentStrategy** (@Order 300) | **Dual-mode location enrichment** (always enabled, like other strategies). Mode determined by `location-enrichment-based-on-organization-path` (default `true`): **Organization-path mode** — uses `location-from-organization-paths` (e.g. `Encounter:serviceProvider`, `ServiceRequest:performer`) to locate the Organization reference, fetches `GET /Organization/{id}?_elements=name` via `OrganizationResolver`, and populates the location field. **Generic mode** — 3-step cascade: (1) location reference already has `display` → skip; (2) location reference exists without `display` → fetch `GET /Location/{id}?_elements=name` via `FhirResourceFetcher` and set display; (3) **only if no location reference is found in the payload** → fall back to the encounter route: find Encounter reference at path configured in `location-from-encounter-paths` (e.g. `Observation:encounter`), fetch `GET /Encounter/{id}?_elements=location` via `LocationResolver`, extract location data, and set on the payload. FHIR R4 spec-aware: uses `locationReference[]` for ServiceRequest, `location[]` (BackboneElement) for Encounter. Resources without a location field in FHIR R4 (e.g. Observation, Condition) are skipped. |
+| 7 | **ForwardingEngine** | If the payload was structurally invalid (not a JSON object, blank `resourceType`), increments `forward.skipped` counter and returns `ForwardResult.skipped()` — no OpenHIM call. Otherwise proceeds to forward (enrichment failures are logged but do not block forwarding). |
 | 8 | **ForwardingEngine** | Builds OpenHIM URL: `baseUrl + "/" + resourceType` if `append-resource-type: true`, otherwise just `baseUrl` |
 | 9 | **ForwardingEngine** | Builds headers: auth (Basic Auth, JWT, Custom Token, or none) |
 | 10 | **ForwardingEngine** | POSTs enriched JSON to OpenHIM via RestTemplate (trust-all or standard); single attempt, no retry. Failures are logged and metered. |
@@ -287,7 +315,7 @@ This is the primary processing path — the synchronous pipeline from FHIR serve
 
 **Success:** Increments `forward.success` counter, records `forward.duration` timer. Returns `200 OK` with empty body.
 **Skipped:** Increments `forward.skipped` counter — only for structurally invalid payloads (not a JSON object, blank `resourceType`). Returns `200 OK` with empty body (ACK to FHIR server).
-**Forward as-is:** When national-id resolution fails, the resource is forwarded to OpenHIM without enrichment. Increments `forward.success` counter on success.
+**Enrichment failure:** When any enrichment strategy fails (e.g. national-id resolution, Practitioner fetch), the failure is logged but forwarding continues — the resource is sent to OpenHIM with whatever enrichment succeeded. Increments `forward.success` counter on successful forward.
 **Failure:** Increments `forward.failure` counter, logs `WARN`. Always returns `200 OK` with empty body to HAPI FHIR — returning a non-FHIR body or non-2xx status causes HAPI FHIR's delivery client to throw `DataFormatException`, which `RetryingMessageHandlerWrapper` retries indefinitely.
 
 #### Sequence Diagram
@@ -297,59 +325,79 @@ sequenceDiagram
     participant FS as FHIR Server
     participant CB as CallbackController
     participant FE as ForwardingEngine
-    participant RE as ResourceEnricher
-    participant RR as ReferenceResolver
+    participant PL as ResourceEnrichmentOrchestrator
+    participant NI as NationalIdEnrichmentStrategy
+    participant PR as PractitionerDisplayStrategy
+    participant LO as LocationEnrichmentStrategy
+    participant NR as NationalIdResolver
     participant T as OpenHIM
 
     FS->>CB: PUT /callback/{key}/{Type}/{id} (FHIR JSON)
     CB->>FE: forward(callbackKey, resourceJson)
     FE->>FE: Parse FHIR metadata (resourceType, resourceId)
-    FE->>RE: enrichReferences(json)
 
-    Note over RE: Enrichment (three strategies based on subject/patient field presence)
     alt Structurally invalid payload (not JSON object, blank resourceType)
-        RE-->>FE: null (skip forward)
         FE->>FE: Increment forward.skipped counter
         FE-->>CB: ForwardResult.skipped()
         CB-->>FS: 200 OK (empty body)
-    else National-id resolution fails
-        RE->>RR: resolveNationalIdFromPayload(json, resourceType)
-        RR-->>RE: null
-        RE-->>FE: original JSON (forward as-is without enrichment)
-    else Resource type has subject field (e.g. Encounter, Observation)
-        RE->>RR: resolveNationalIdFromPayload(json, resourceType)
-        alt Identity-resource resource (e.g. RelatedPerson)
-            RR->>RR: Extract national-id from own identifier[]
-            RR-->>RE: national-id
+    else Valid payload
+        FE->>PL: enrich(context)
+        Note over PL: Runs strategies in @Order sequence (100, 200, 300)
+
+        PL->>NI: enrich(context) — @Order(100)
+        NI->>NR: resolveNationalIdFromPayload(payload, resourceType)
+        alt Identity-resource (e.g. RelatedPerson)
+            NR->>NR: Extract national-id from own identifier[]
+            NR-->>NI: national-id
         else Other resource (e.g. Encounter)
-            RR->>RR: Look up configured path (e.g. participant.individual.reference)
-            RR->>RR: Walk JSON path → extract personReferenceIdentifier (FHIR resource ID from reference)
-            RR->>FS: GET /{personIdentityResourceType}/{personReferenceIdentifier}?_elements=identifier
-            FS-->>RR: Identity-resource JSON
-            RR->>RR: Apply match strategies
-            RR-->>RE: national-id
+            NR->>NR: Walk configured path → find identity-resource reference
+            NR->>FS: GET /{personIdentityResourceType}/{id}?_elements=identifier
+            FS-->>NR: Identity-resource JSON
+            NR->>NR: Apply match strategies (use-official → type-code → system-suffix)
+            NR-->>NI: national-id
         end
-        RE->>RE: Set subject.reference = Patient/<national-id>
-        RE-->>FE: enriched JSON
-    else Resource type has patient field (e.g. AllergyIntolerance, RelatedPerson)
-        RE->>RR: resolveNationalIdFromPayload(json, resourceType)
-        RR-->>RE: national-id
-        RE->>RE: Set patient.reference = Patient/<national-id>
-        RE-->>FE: enriched JSON
-    else Resource type has NEITHER subject nor patient field (e.g. Location, Organization)
-        RE->>RR: resolveNationalIdFromPayload(json, resourceType)
-        RR-->>RE: national-id
-        RE->>RE: Add {system, value} to identifier[]
-        RE-->>FE: enriched JSON
-    end
-    FE->>FE: Build headers (auth)
-    FE->>T: POST /fhir/{ResourceType} (enriched FHIR JSON)
-    alt Success
-        T-->>FE: 200 OK
-        FE->>FE: Increment forward.success counter
-    else Failure (4xx/5xx/unreachable)
-        T-->>FE: Error / connection failure
-        FE->>FE: Increment forward.failure counter, log WARN
+        NI->>NI: Set subject/patient/identifier[] based on RuntimeResourceDefinition
+
+        PL->>PR: enrich(context) — @Order(200)
+        PR->>PR: Find Practitioner ref at configured path (array fan-out)
+        opt Practitioner found, display absent
+            PR->>FS: GET /Practitioner/{id}?_elements=name
+            FS-->>PR: Practitioner JSON
+            PR->>PR: Set display on reference node
+        end
+
+        PL->>LO: enrich(context) — @Order(300)
+        alt Organization-path mode
+            LO->>LO: Find Organization ref at configured path
+            LO->>FS: GET /Organization/{id}?_elements=name
+            FS-->>LO: Organization JSON
+            LO->>LO: Populate location field with Organization ref + display
+        else Generic mode
+            LO->>LO: Check location field in payload
+            alt Location reference exists with display
+                LO->>LO: Skip (already enriched)
+            else Location reference exists without display
+                LO->>FS: GET /Location/{id}?_elements=name
+                FS-->>LO: Location JSON
+                LO->>LO: Set display on location reference
+            else No location reference in payload
+                LO->>LO: Find Encounter ref at configured path (fallback)
+                LO->>FS: GET /Encounter/{id}?_elements=location
+                FS-->>LO: Encounter JSON
+                LO->>LO: Extract location data from Encounter, set on payload
+            end
+        end
+
+        PL-->>FE: enrichment complete (in-place mutation)
+        FE->>FE: Build headers (auth)
+        FE->>T: POST /fhir/{ResourceType} (enriched FHIR JSON)
+        alt Success
+            T-->>FE: 200 OK
+            FE->>FE: Increment forward.success counter
+        else Failure (4xx/5xx/unreachable)
+            T-->>FE: Error / connection failure
+            FE->>FE: Increment forward.failure counter, log WARN
+        end
     end
     FE-->>CB: forwarding result
     CB-->>FS: 200 OK (empty body — always, regardless of outcome)

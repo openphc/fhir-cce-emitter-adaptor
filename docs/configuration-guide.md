@@ -48,10 +48,11 @@ emitter:
     national-id-system-suffix: "/national-id"
     national-id-type-code: "NI"
     national-id-identifier-system: "http://openphc.org/identifier/upid"   # System URI used when adding national-id to identifier[]
-    person-identity-reference-paths: Encounter:participant.individual.reference,ServiceRequest:performer.reference,Observation:performer.reference   # ResourceType:dot.path entries for locating identity-source references
+    person-identity-reference-paths: Encounter:participant.individual,ServiceRequest:performer,Observation:performer   # ResourceType:dot.path entries for locating identity-source references
     practitioner-display-paths: Encounter:participant.individual,Observation:performer,ServiceRequest:performer,Condition:asserter   # ResourceType:dot.path entries for Practitioner display name enrichment
-    location-enrichment-enabled: true   # Enable Organization-based Location enrichment
-    organization-location-paths: Encounter:serviceProvider.reference,ServiceRequest:performer.reference   # ResourceType:dot.path entries for Organization references used to populate location
+    location-enrichment-based-on-organization-path: true   # Mode: true=organization-path, false=generic (3-step cascade)
+    location-from-organization-paths: Encounter:serviceProvider,ServiceRequest:performer   # ResourceType:dot.path for Organization reference (used in org-path mode)
+    location-from-encounter-paths: Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter   # ResourceType:dot.path for Encounter reference (used in generic mode)
 ```
 
 ### Config Classes
@@ -64,7 +65,7 @@ emitter:
 | `OpenhimConfig` | `emitter.openhim` | OpenHIM name, URL, auth, SSL |
 | `OpenhimAuthConfig` | `emitter.openhim.auth` | Auth type + credentials for OpenHIM (none, basic, jwt, or custom-token) |
 | `StartupSubscriptionConfig` | `emitter.startup-subscriptions` | Auto-subscribe toggle and delay |
-| `ReferenceResolutionConfig` | `emitter.reference-resolution` | Identity-resource type, national-id match strategies, identifier system URI, per-resource-type paths for locating identity-source references, and per-resource-type paths for Practitioner display name enrichment |
+| `ReferenceResolutionConfig` | `emitter.reference-resolution` | Identity-resource type, national-id match strategies, identifier system URI, per-resource-type paths for identity-source references, Practitioner display enrichment, and dual-mode location enrichment (organization-path or generic 3-step cascade) |
 
 ---
 
@@ -127,7 +128,11 @@ emitter:
     national-id-system-suffix: "${EMITTER_NATIONAL_ID_SYSTEM_SUFFIX:/national-id}"
     national-id-type-code: "${EMITTER_NATIONAL_ID_TYPE_CODE:NI}"
     national-id-identifier-system: "${EMITTER_NATIONAL_ID_IDENTIFIER_SYSTEM:http://openphc.org/identifier/upid}"
-    person-identity-reference-paths: ${EMITTER_PERSON_IDENTITY_REFERENCE_PATHS:Encounter:participant.individual.reference,ServiceRequest:performer.reference,Observation:performer.reference,Patient:link.other.reference}
+    person-identity-reference-paths: ${EMITTER_PERSON_IDENTITY_REFERENCE_PATHS:Encounter:participant.individual,ServiceRequest:performer,Observation:performer,Patient:link.other}
+    practitioner-display-paths: ${EMITTER_PRACTITIONER_DISPLAY_PATHS:Encounter:participant.individual,Observation:performer,ServiceRequest:performer,Condition:asserter}
+    location-enrichment-based-on-organization-path: ${EMITTER_LOCATION_ENRICHMENT_BASED_ON_ORGANIZATION_PATH:true}
+    location-from-organization-paths: ${EMITTER_LOCATION_FROM_ORGANIZATION_PATHS:Encounter:serviceProvider,ServiceRequest:performer}
+    location-from-encounter-paths: ${EMITTER_LOCATION_FROM_ENCOUNTER_PATHS:Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter}
 
 logging:
   level:
@@ -380,11 +385,11 @@ With `startup-subscriptions.enabled=true`, restarting the emitter automatically 
 
 ## 7. Reference Resolution (national-id lookup)
 
-`ReferenceResolver` orchestrates national-id resolution on every inbound FHIR callback, and `ResourceEnricher` places the resolved national-id on the appropriate field based on whether the resource type has a `subject` or `patient` field in the FHIR R4 spec.
+The `ResourceEnrichmentOrchestrator` orchestrates enrichment on every inbound FHIR callback, running registered `EnrichmentStrategy` beans in injection order. The `NationalIdEnrichmentStrategy` resolves the national-id via `NationalIdResolver` and places it on the appropriate field based on the resource type's FHIR R4 definition.
 
 ### Enrichment Strategies
 
-`ResourceEnricher` checks whether the resource type has a `subject` or `patient` field in the FHIR R4 specification using HAPI FHIR's `RuntimeResourceDefinition`. Fields are checked in priority order (`FHIR_R4_PATIENT_REFERENCE_FIELDS = ["subject", "patient"]`) — first match wins:
+`NationalIdEnrichmentStrategy` checks whether the resource type has a `subject` or `patient` field in the FHIR R4 specification using HAPI FHIR's `RuntimeResourceDefinition`. Fields are checked in priority order (`FHIR_R4_PATIENT_REFERENCE_FIELDS = ["subject", "patient"]`) — first match wins:
 
 1. **Has `subject` field** (e.g. Encounter, Observation, ServiceRequest): sets `subject.reference = "Patient/<national-id>"`
 2. **Has `patient` field** (e.g. AllergyIntolerance, RelatedPerson, Claim, EpisodeOfCare): sets `patient.reference = "Patient/<national-id>"`
@@ -402,7 +407,7 @@ The **identity-resource type** (default: `RelatedPerson`) is the FHIR resource t
 
 **Identity-resource resources (e.g. RelatedPerson):** When the incoming callback is for the configured identity-resource type, the national-id is extracted directly from its own `identifier[]` using the configured match strategies. Enrichment is then applied based on the resource type's FHIR R4 definition — RelatedPerson has a `patient` field, so `patient.reference = "Patient/<national-id>"` is set. If no national-id is found, the resource is forwarded as-is.
 
-**Other resources (e.g. Encounter, Observation):** The resolver looks up the configured JSON path from `person-identity-reference-paths` (e.g. `Encounter:participant.individual.reference`), walks the JSON tree along that path to find an identity-source reference (e.g. `RelatedPerson/499063`). The FHIR resource ID extracted from this reference is called the **`personReferenceIdentifier`** (e.g. `"499063"` from `"RelatedPerson/499063"`) — it identifies which person resource to fetch. The resolver then fetches `GET /{personIdentityResourceType}/{personReferenceIdentifier}?_elements=identifier` from the FHIR server, resolves the national-id via the configured match strategies, and applies the appropriate enrichment strategy.
+**Other resources (e.g. Encounter, Observation):** The resolver looks up the configured JSON path from `person-identity-reference-paths` (e.g. `Encounter:participant.individual`), walks the JSON tree along that path to find an identity-source reference (e.g. `RelatedPerson/499063`). The FHIR resource ID extracted from this reference is called the **`personReferenceIdentifier`** (e.g. `"499063"` from `"RelatedPerson/499063"`) — it identifies which person resource to fetch. The resolver then fetches `GET /{personIdentityResourceType}/{personReferenceIdentifier}?_elements=identifier` from the FHIR server, resolves the national-id via the configured match strategies, and applies the appropriate enrichment strategy.
 
 **Enrichment strategies:** Resources are checked for `subject` and `patient` fields in priority order. For resources with a `subject` field, `subject.reference = "Patient/<national-id>"` is set. For resources with a `patient` field (but no `subject`), `patient.reference = "Patient/<national-id>"` is set. For resources with neither field, `{"system": "<configured-system>", "value": "<national-id>"}` is added to `identifier[]`.
 
@@ -422,16 +427,16 @@ The **identity-resource type** (default: `RelatedPerson`) is the FHIR resource t
 emitter:
   reference-resolution:
     person-identity-reference-paths:
-      - "Encounter:participant.individual.reference"
-      - "ServiceRequest:performer.reference"
-      - "Observation:performer.reference"
-      - "Patient:link.other.reference"
+      - "Encounter:participant.individual"
+      - "ServiceRequest:performer"
+      - "Observation:performer"
+      - "Patient:link.other"
 ```
 
 or via env var (comma-separated):
 
 ```bash
-EMITTER_PERSON_IDENTITY_REFERENCE_PATHS=Encounter:participant.individual.reference,ServiceRequest:performer.reference,Observation:performer.reference,Patient:link.other.reference
+EMITTER_PERSON_IDENTITY_REFERENCE_PATHS=Encounter:participant.individual,ServiceRequest:performer,Observation:performer,Patient:link.other
 ```
 
 Resources not listed in `person-identity-reference-paths` and that are not the configured identity-resource type will have national-id resolution fail, and will be **forwarded as-is without enrichment** (never skipped).
@@ -495,11 +500,11 @@ Each inbound callback triggers at most one FHIR server fetch for the identity-so
 
 ### Failure Behavior
 
-`ReferenceResolver` is **strict**: if any step in the resolution pipeline fails — no configured path, no identity-source reference at path (i.e. no `personReferenceIdentifier` found), no national-id from the fetched resource, or any exception during resolution — the resolver returns `null`. The `ResourceEnricher` then forwards the resource **as-is without enrichment** (never skipped). Only structurally invalid payloads (not a JSON object, blank `resourceType`) cause the forward to be skipped.
+`NationalIdResolver` is **strict**: if any step in the resolution pipeline fails — no configured path, no identity-source reference at path (i.e. no `personReferenceIdentifier` found), no national-id from the fetched resource, or any exception during resolution — the resolver returns `null`. The `NationalIdEnrichmentStrategy` then logs WARN and continues — the resource is forwarded **as-is without national-id enrichment** (never skipped). Only structurally invalid payloads (not a JSON object, blank `resourceType`) cause the forward to be skipped.
 
 ### Practitioner Display Paths
 
-`emitter.reference-resolution.practitioner-display-paths` maps FHIR resource types to the JSON path where a Practitioner reference can be found. After national-id enrichment, `ResourceEnricher` uses these paths to locate the first `Practitioner/{id}` reference and populate its `display` field by fetching the Practitioner's name from the FHIR server. Format: `ResourceType:dot.separated.path`.
+`emitter.reference-resolution.practitioner-display-paths` maps FHIR resource types to the JSON path where a Practitioner reference can be found. The `PractitionerDisplayEnrichmentStrategy` (@Order 200) uses these paths to locate the first `Practitioner/{id}` reference and populate its `display` field by fetching the Practitioner's name from the FHIR server via `PractitionerResolver`. Format: `ResourceType:dot.separated.path`.
 
 ```yaml
 emitter:
@@ -520,7 +525,7 @@ EMITTER_PRACTITIONER_DISPLAY_PATHS=Encounter:participant.individual,Observation:
 **How it works:**
 
 1. For each inbound resource, looks up the configured path for its resource type (e.g. `Encounter` → `participant.individual`)
-2. Walks the JSON tree using `ReferenceResolver.extractPractitionerRefNodeAtPath()` — which splits the dot-path into segments and delegates to a private recursive walker that handles array fan-out at intermediate levels and checks the leaf node for a `Practitioner/{id}` reference
+2. Walks the JSON tree using `PractitionerResolver.extractPractitionerRefNodeAtPath()` — which splits the dot-path into segments and uses `ResolverPathHelper` to recursively walk the tree with array fan-out at intermediate levels, checking the leaf node for a `Practitioner/{id}` reference
 3. If found and `display` is absent or blank, extracts the Practitioner ID (e.g. `"12345"` from `"Practitioner/12345"`)
 4. Fetches `GET /Practitioner/{id}?_elements=name` from the FHIR server
 5. Extracts a human-readable display name from the FHIR `HumanName` array (priority: `name[0].text` → `given[0] + " " + family` → `family` → `given[0]`)
@@ -549,23 +554,29 @@ Resources not listed in `practitioner-display-paths` are not affected — their 
 
 ### Location Enrichment
 
-`emitter.reference-resolution.location-enrichment-enabled` controls whether Location references are enriched with display names and resolved from the Encounter when absent. Default: `true`.
+The `LocationEnrichmentStrategy` (@Order 300) provides **dual-mode** location enrichment, controlled by the mode selector:
+
+- `emitter.reference-resolution.location-enrichment-based-on-organization-path` — mode selector (default: `true`)
 
 ```yaml
 emitter:
   reference-resolution:
-    location-enrichment-enabled: true   # or false to disable
+    location-enrichment-based-on-organization-path: true       # true=org-path mode, false=generic mode
+    location-from-organization-paths: "Encounter:serviceProvider,ServiceRequest:performer"
+    location-from-encounter-paths: "Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter"
 ```
 
-or via env var:
+or via env vars:
 
 ```bash
-EMITTER_LOCATION_ENRICHMENT_ENABLED=true
+EMITTER_LOCATION_ENRICHMENT_BASED_ON_ORGANIZATION_PATH=true
+EMITTER_LOCATION_FROM_ORGANIZATION_PATHS=Encounter:serviceProvider,ServiceRequest:performer
+EMITTER_LOCATION_FROM_ENCOUNTER_PATHS=Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter
 ```
 
 **FHIR R4 spec-aware behavior:**
 
-The enricher uses HAPI FHIR's `RuntimeResourceDefinition` to determine the correct location field for each resource type:
+The strategy uses HAPI FHIR's `RuntimeResourceDefinition` to determine the correct location field for each resource type:
 
 | Resource Type | Location Field | Structure |
 |---------------|---------------|-----------|
@@ -573,22 +584,32 @@ The enricher uses HAPI FHIR's `RuntimeResourceDefinition` to determine the corre
 | Encounter | `location` | BackboneElement array with nested `.location` Reference |
 | Observation, Condition, etc. | *(none)* | Skipped entirely — no location field in FHIR R4 |
 
-**How it works:**
+#### Organization-Path Mode (`location-enrichment-based-on-organization-path: true`)
 
-1. Determines the location field for the resource type (`locationReference` → `location` → null/skip)
-2. If the resource has no location populated but has an `encounter` reference (e.g. `"encounter": {"reference": "Encounter/123"}`):
+Uses `location-from-organization-paths` to locate the Organization reference in the payload:
+
+1. Looks up the configured path for the resource type (e.g. `Encounter` → `serviceProvider`)
+2. Walks the JSON tree to find an `Organization/{id}` reference via `OrganizationResolver`
+3. Fetches `GET /Organization/{id}?_elements=name` from the FHIR server
+4. Populates the location field with `{"reference": "Organization/{id}", "display": "<org name>"}`
+   - ServiceRequest: populates flat `locationReference[]`
+   - Encounter: populates nested `location[].location`
+
+#### Generic Mode (`location-enrichment-based-on-organization-path: false`)
+
+Uses `location-from-encounter-paths` and `LocationResolver` for a 3-step cascade:
+
+1. **Skip if display exists** — if the location field already has a populated `display`, no fetch needed
+2. **Fetch Location display** — if `Location/{id}` reference exists, fetches `GET /Location/{id}?_elements=name` to get the display name
+3. **Derive from Encounter** — if no location is populated but an `encounter` reference exists (using configured `location-from-encounter-paths`):
    - Fetches `GET /Encounter/{id}?_elements=location` from the FHIR server
    - For `locationReference` targets (ServiceRequest): converts Encounter's nested `location[].location` to flat `Reference[]`
    - For `location` targets (Encounter-like): copies the `location[]` array directly
-3. Enriches `display` on any `Location/{id}` references by fetching `GET /Location/{id}?_elements=name`
 
 **Skip conditions (silent, non-fatal):**
-- Feature disabled (`location-enrichment-enabled: false`)
 - Resource type has no location field in FHIR R4
-- Location already populated (no Encounter fetch needed, proceeds to display enrichment)
-- No `encounter` reference present and no existing locations
-- Encounter fetch fails (logs WARN, continues without location)
-- Location display fetch fails (logs WARN, continues without display)
+- No configured path for the resource type in the active mode
+- Organization/Location/Encounter fetch fails (logs WARN, continues without enrichment)
 - Location uses contained references (`#1`) — cannot be fetched externally
 
 ---
@@ -633,8 +654,9 @@ The enricher uses HAPI FHIR's `RuntimeResourceDefinition` to determine the corre
 | `EMITTER_NATIONAL_ID_TYPE_CODE` | HL7 v2-0203 code (or other code) used by the `type-code` strategy | `NI` |
 | `EMITTER_NATIONAL_ID_IDENTIFIER_SYSTEM` | System URI used when adding national-id to `identifier[]` for resources without a `subject` or `patient` field | `http://openphc.org/identifier/upid` |
 | `EMITTER_PRACTITIONER_DISPLAY_PATHS` | Comma-separated `ResourceType:dot.path` entries for locating Practitioner references to enrich with display names. The resolver walks the path to find the first `Practitioner/{id}` reference and fetches the Practitioner's name from the FHIR server. | `Encounter:participant.individual,Observation:performer,ServiceRequest:performer,Condition:asserter` |
-| `EMITTER_LOCATION_ENRICHMENT_ENABLED` | Enable Organization-based Location enrichment. FHIR R4 spec-aware: uses `locationReference[]` for ServiceRequest, `location[]` (BackboneElement) for Encounter. Extracts Organization reference from configured path, fetches display name from FHIR server. Resources without a location field are skipped. | `true` |
-| `EMITTER_ORGANIZATION_LOCATION_PATHS` | Comma-separated `ResourceType:dot.path` entries for locating Organization references in the payload to populate the location field. | `Encounter:serviceProvider.reference,ServiceRequest:performer.reference` |
+| `EMITTER_LOCATION_ENRICHMENT_BASED_ON_ORGANIZATION_PATH` | Location enrichment mode: `true` = organization-path mode (uses `location-from-organization-paths`), `false` = generic mode (uses `location-from-encounter-paths` with 3-step cascade). | `true` |
+| `EMITTER_LOCATION_FROM_ORGANIZATION_PATHS` | Comma-separated `ResourceType:dot.path` entries for locating Organization references in the payload to populate the location field (organization-path mode). | `Encounter:serviceProvider,ServiceRequest:performer` |
+| `EMITTER_LOCATION_FROM_ENCOUNTER_PATHS` | Comma-separated `ResourceType:dot.path` entries for locating Encounter references used to derive location data (generic mode). | `Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter` |
 | `HEALTH_SHOW_DETAILS` | Health endpoint detail visibility | `when-authorized` |
 | `LOG_LEVEL_ROOT` | Root log level | `INFO` |
 | `LOG_LEVEL_APP` | Application log level | `INFO` |

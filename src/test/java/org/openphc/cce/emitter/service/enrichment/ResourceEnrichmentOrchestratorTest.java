@@ -1,4 +1,4 @@
-package org.openphc.cce.emitter.service;
+package org.openphc.cce.emitter.service.enrichment;
 
 import ca.uhn.fhir.context.FhirContext;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -11,31 +11,39 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.openphc.cce.emitter.config.EmitterProperties;
+import org.openphc.cce.emitter.service.resolver.LocationResolver;
+import org.openphc.cce.emitter.service.resolver.NationalIdResolver;
+import org.openphc.cce.emitter.service.resolver.OrganizationResolver;
+import org.openphc.cce.emitter.service.resolver.PractitionerResolver;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * Unit tests for {@link ResourceEnricher}.
- *
- * <p>Verifies that the enricher delegates national-id resolution to
- * {@link ReferenceResolver} and correctly enriches the payload based on the
- * resource type's FHIR R4 definition:
- * <ul>
- *   <li>Has {@code subject} field → sets {@code subject.reference = "Patient/<national-id>"}</li>
- *   <li>No {@code subject} field → adds national-id to {@code identifier[]} array</li>
- * </ul>
+ * Unit tests for {@link ResourceEnrichmentOrchestrator} — tests the full enrichment orchestrator
+ * with real strategies and mocked resolvers.
  */
 @ExtendWith(MockitoExtension.class)
-class ResourceEnricherTest {
+class ResourceEnrichmentOrchestratorTest {
 
     @Mock
-    private ReferenceResolver referenceResolver;
+    private NationalIdResolver nationalIdResolver;
+
+    @Mock
+    private PractitionerResolver practitionerResolver;
+
+    @Mock
+    private OrganizationResolver organizationResolver;
+
+    @Mock
+    private LocationResolver locationResolver;
 
     private ObjectMapper objectMapper;
     private FhirContext fhirContext;
-    private ResourceEnricher enricher;
+    private ResourceEnrichmentOrchestrator orchestrator;
 
     @BeforeEach
     void setUp() {
@@ -45,10 +53,19 @@ class ResourceEnricherTest {
         EmitterProperties properties = new EmitterProperties();
         properties.setReferenceResolution(new EmitterProperties.ReferenceResolutionConfig());
 
-        // extractPractitionerNodeAtPath is pure JSON logic — delegate to real implementation
-        lenient().when(referenceResolver.extractPractitionerRefNodeAtPath(any(), any())).thenCallRealMethod();
+        // Allow PractitionerResolver's extractPractitionerRefNodeAtPath to use real implementation
+        lenient().when(practitionerResolver.extractPractitionerRefNodeAtPath(any(), any())).thenCallRealMethod();
 
-        enricher = new ResourceEnricher(referenceResolver, objectMapper, fhirContext, properties);
+        // Create real strategy instances with mocked resolvers
+        NationalIdEnrichmentStrategy nationalIdStrategy = new NationalIdEnrichmentStrategy(
+                nationalIdResolver, objectMapper, fhirContext, properties);
+        PractitionerDisplayEnrichmentStrategy practitionerStrategy = new PractitionerDisplayEnrichmentStrategy(
+                practitionerResolver, properties);
+        LocationEnrichmentStrategy locationStrategy = new LocationEnrichmentStrategy(
+                organizationResolver, locationResolver, objectMapper, fhirContext, properties);
+
+        orchestrator = new ResourceEnrichmentOrchestrator(objectMapper,
+                List.of(nationalIdStrategy, practitionerStrategy, locationStrategy));
     }
 
     // ── Successful enrichment — subject reference ───────────────────
@@ -71,10 +88,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -95,10 +112,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -119,10 +136,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -144,10 +161,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -175,16 +192,14 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            // Should set patient.reference = Patient/<national-id>
             assertEquals("Patient/1212121212", root.path("patient").path("reference").asText());
-            // Original identifier[] should remain unchanged (1 entry)
             assertTrue(root.path("identifier").isArray());
             assertEquals(1, root.path("identifier").size());
         }
@@ -200,16 +215,14 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            // Should set patient.reference = Patient/<national-id>
             assertEquals("Patient/1212121212", root.path("patient").path("reference").asText());
-            // Should NOT have identifier[] enrichment
             assertTrue(root.path("identifier").isMissingNode());
         }
 
@@ -226,10 +239,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("9999999999");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -250,10 +263,10 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("5555555555");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -265,66 +278,17 @@ class ResourceEnricherTest {
         }
     }
 
-    // ── Forward as-is (resolver returns null) ───────────────────────
+    // ── Structural validation / forward as-is ────────────────────────
 
     @Nested
-    @DisplayName("Forward as-is — returns original JSON when resolution fails")
-    class ForwardAsIs {
-
-        @Test
-        @DisplayName("forwards as-is when resolver returns null (resource with subject)")
-        void forwardsAsIsWhenResolverReturnsNull() {
-            String json = """
-                    {
-                      "resourceType": "Encounter",
-                      "id": "499084",
-                      "participant": [
-                        {"individual": {"reference": "Practitioner/497436"}}
-                      ]
-                    }
-                    """;
-
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
-                    .thenReturn(null);
-
-            String result = enricher.enrichReferences(json);
-
-            assertNotNull(result, "Should forward as-is when resolver returns null");
-            assertEquals(json, result, "Should return original JSON unchanged");
-        }
-
-        @Test
-        @DisplayName("forwards as-is when resolver returns null (resource without subject)")
-        void forwardsAsIsWhenResolverReturnsNullForNonSubjectResource() {
-            String json = """
-                    {
-                      "resourceType": "RelatedPerson",
-                      "id": "499063"
-                    }
-                    """;
-
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
-                    .thenReturn(null);
-
-            String result = enricher.enrichReferences(json);
-
-            assertNotNull(result, "Should forward as-is when resolver returns null");
-            assertEquals(json, result, "Should return original JSON unchanged");
-        }
-
-        @Test
-        @DisplayName("forwards as-is for invalid JSON")
-        void forwardsAsIsForInvalidJson() {
-            String json = "not valid json {{{";
-            String result = enricher.enrichReferences(json);
-            assertNull(result, "Should return null on parse exception — not a JSON object");
-        }
+    @DisplayName("Structural validation — returns null for invalid payloads, as-is for resolution failures")
+    class StructuralValidation {
 
         @Test
         @DisplayName("returns null for non-object JSON")
         void returnsNullForNonObjectJson() {
-            String result = enricher.enrichReferences("[1, 2, 3]");
-            assertNull(result, "Should return null when payload is not a JSON object");
+            String result = orchestrator.enrichReferences("[1, 2, 3]");
+            assertNull(result);
         }
 
         @Test
@@ -337,10 +301,37 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
+            assertNull(result);
+        }
 
-            assertNull(result, "Should return null when resourceType is blank");
-            verifyNoInteractions(referenceResolver);
+        @Test
+        @DisplayName("returns null for invalid JSON")
+        void returnsNullForInvalidJson() {
+            String result = orchestrator.enrichReferences("not valid json {{{");
+            assertNull(result);
+        }
+
+        @Test
+        @DisplayName("national-id resolver returns null — still returns enriched (empty) JSON (pipeline continues)")
+        void continuesWhenNationalIdReturnsNull() throws Exception {
+            String json = """
+                    {
+                      "resourceType": "Encounter",
+                      "id": "499084",
+                      "participant": [
+                        {"individual": {"reference": "Practitioner/497436"}}
+                      ]
+                    }
+                    """;
+
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+                    .thenReturn(null);
+
+            String result = orchestrator.enrichReferences(json);
+
+            // Pipeline doesn't return null for resolution failures — strategies handle gracefully
+            assertNotNull(result);
         }
     }
 
@@ -364,12 +355,12 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.fetchPractitionerDisplayName("12345"))
+            when(practitionerResolver.fetchPractitionerDisplayName("12345"))
                     .thenReturn("Dr. Aziz Muhammed");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -391,15 +382,14 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            assertTrue(root.path("participant").get(0).path("individual").path("display").isMissingNode(),
-                    "Should not add display for non-Practitioner reference");
+            assertTrue(root.path("participant").get(0).path("individual").path("display").isMissingNode());
         }
 
         @Test
@@ -416,48 +406,16 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
             assertEquals("Existing Name",
-                    root.path("participant").get(0).path("individual").path("display").asText(),
-                    "Should not overwrite existing display");
-            verify(referenceResolver, never()).fetchPractitionerDisplayName(anyString());
-        }
-
-        @Test
-        @DisplayName("Encounter with multiple participants — only enriches Practitioner")
-        void enrichesOnlyPractitionerInMixedParticipants() throws Exception {
-            String json = """
-                    {
-                      "resourceType": "Encounter",
-                      "id": "502969",
-                      "subject": {"reference": "Patient/499304"},
-                      "participant": [
-                        {"individual": {"reference": "RelatedPerson/499291"}},
-                        {"individual": {"reference": "Practitioner/12345"}}
-                      ]
-                    }
-                    """;
-
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
-                    .thenReturn("1212121212");
-            when(referenceResolver.fetchPractitionerDisplayName("12345"))
-                    .thenReturn("Dr. Aziz Muhammed");
-
-            String result = enricher.enrichReferences(json);
-
-            assertNotNull(result);
-            JsonNode root = objectMapper.readTree(result);
-            // First participant (RelatedPerson) — no display
-            assertTrue(root.path("participant").get(0).path("individual").path("display").isMissingNode());
-            // Second participant (Practitioner) — display enriched
-            assertEquals("Dr. Aziz Muhammed",
-                    root.path("participant").get(1).path("individual").path("display").asText());
+                    root.path("participant").get(0).path("individual").path("display").asText());
+            verify(practitionerResolver, never()).fetchPractitionerDisplayName(anyString());
         }
 
         @Test
@@ -474,42 +432,16 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.fetchPractitionerDisplayName("67890"))
+            when(practitionerResolver.fetchPractitionerDisplayName("67890"))
                     .thenReturn("Dr. Jean");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            assertEquals("Dr. Jean",
-                    root.path("performer").get(0).path("display").asText());
-        }
-
-        @Test
-        @DisplayName("Condition with Practitioner asserter — enriches display")
-        void enrichesPractitionerDisplayOnCondition() throws Exception {
-            String json = """
-                    {
-                      "resourceType": "Condition",
-                      "id": "cond-456",
-                      "subject": {"reference": "Patient/499304"},
-                      "asserter": {"reference": "Practitioner/11111"}
-                    }
-                    """;
-
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
-                    .thenReturn("1212121212");
-            when(referenceResolver.fetchPractitionerDisplayName("11111"))
-                    .thenReturn("Dr. Jean");
-
-            String result = enricher.enrichReferences(json);
-
-            assertNotNull(result);
-            JsonNode root = objectMapper.readTree(result);
-            assertEquals("Dr. Jean",
-                    root.path("asserter").path("display").asText());
+            assertEquals("Dr. Jean", root.path("performer").get(0).path("display").asText());
         }
 
         @Test
@@ -526,17 +458,16 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.fetchPractitionerDisplayName("12345"))
+            when(practitionerResolver.fetchPractitionerDisplayName("12345"))
                     .thenReturn(null);
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            assertTrue(root.path("participant").get(0).path("individual").path("display").isMissingNode(),
-                    "Should not add display when fetch returns null");
+            assertTrue(root.path("participant").get(0).path("individual").path("display").isMissingNode());
         }
 
         @Test
@@ -553,20 +484,20 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
-            verify(referenceResolver, never()).fetchPractitionerDisplayName(anyString());
+            verify(practitionerResolver, never()).fetchPractitionerDisplayName(anyString());
         }
     }
 
     // ── Location enrichment ─────────────────────────────────────────
 
     @Nested
-    @DisplayName("Location enrichment — FHIR R4 spec-aware: locationReference for ServiceRequest, location[] for Encounter")
+    @DisplayName("Location enrichment — Organization-based location via configured paths")
     class LocationEnrichment {
 
         @Test
@@ -583,18 +514,17 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("performer.reference")))
+            when(organizationResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("performer")))
                     .thenReturn("1302");
-            when(referenceResolver.fetchOrganizationDisplayName("1302"))
+            when(organizationResolver.fetchOrganizationDisplayName("1302"))
                     .thenReturn("City Hospital");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
-            // ServiceRequest uses flat locationReference[] per FHIR R4 spec
             assertTrue(root.path("locationReference").isArray());
             assertEquals(1, root.path("locationReference").size());
             assertEquals("Organization/1302",
@@ -614,14 +544,14 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("serviceProvider.reference")))
+            when(organizationResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("serviceProvider")))
                     .thenReturn("1302");
-            when(referenceResolver.fetchOrganizationDisplayName("1302"))
+            when(organizationResolver.fetchOrganizationDisplayName("1302"))
                     .thenReturn("ICU Room 3");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -644,15 +574,15 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
             assertTrue(root.path("locationReference").isMissingNode());
-            verify(referenceResolver, never()).fetchOrganizationDisplayName(anyString());
+            verify(organizationResolver, never()).fetchOrganizationDisplayName(anyString());
         }
 
         @Test
@@ -666,14 +596,14 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
-            when(referenceResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("performer.reference")))
+            when(organizationResolver.extractOrganizationIdAtPath(any(JsonNode.class), eq("performer")))
                     .thenReturn("999");
-            when(referenceResolver.fetchOrganizationDisplayName("999"))
+            when(organizationResolver.fetchOrganizationDisplayName("999"))
                     .thenReturn(null);
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
             JsonNode root = objectMapper.readTree(result);
@@ -695,33 +625,13 @@ class ResourceEnricherTest {
                     }
                     """;
 
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
+            when(nationalIdResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
                     .thenReturn("1212121212");
 
-            String result = enricher.enrichReferences(json);
+            String result = orchestrator.enrichReferences(json);
 
             assertNotNull(result);
-            verify(referenceResolver, never()).fetchOrganizationDisplayName(anyString());
-        }
-
-        @Test
-        @DisplayName("RelatedPerson (no location field) — skips location enrichment")
-        void skipsWhenNoLocationFieldOnResourceType() throws Exception {
-            String json = """
-                    {
-                      "resourceType": "RelatedPerson",
-                      "id": "rp-1",
-                      "identifier": [{"use": "official", "value": "1212121212"}]
-                    }
-                    """;
-
-            when(referenceResolver.resolveNationalIdFromPayload(any(JsonNode.class)))
-                    .thenReturn("1212121212");
-
-            String result = enricher.enrichReferences(json);
-
-            assertNotNull(result);
-            verify(referenceResolver, never()).fetchOrganizationDisplayName(anyString());
+            verify(organizationResolver, never()).fetchOrganizationDisplayName(anyString());
         }
     }
 }

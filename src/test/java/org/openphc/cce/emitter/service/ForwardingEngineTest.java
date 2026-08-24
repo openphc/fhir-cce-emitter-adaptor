@@ -14,6 +14,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.openphc.cce.emitter.config.EmitterProperties;import org.openphc.cce.emitter.config.EmitterProperties.*;
+import org.openphc.cce.emitter.service.enrichment.ResourceEnrichmentOrchestrator;
 import org.springframework.http.*;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
@@ -51,7 +52,7 @@ class ForwardingEngineTest {
     private IIdType idType;
 
     @Mock
-    private ResourceEnricher resourceEnricher;
+    private ResourceEnrichmentOrchestrator enrichmentOrchestrator;
 
     private MeterRegistry meterRegistry;
     private EmitterProperties properties;
@@ -68,10 +69,10 @@ class ForwardingEngineTest {
     void setUp() {
         meterRegistry = new SimpleMeterRegistry();
         properties = buildDefaultProperties();
-        // ResourceEnricher returns input unchanged by default (pass-through)
-        lenient().when(resourceEnricher.enrichReferences(anyString())).thenAnswer(i -> i.getArgument(0));
+        // ResourceEnrichmentOrchestrator returns input unchanged by default (pass-through)
+        lenient().when(enrichmentOrchestrator.enrichReferences(anyString())).thenAnswer(i -> i.getArgument(0));
         engine = new ForwardingEngine(fhirContext, properties,
-                standardRestTemplate, trustAllRestTemplate, resourceEnricher, meterRegistry);
+                standardRestTemplate, trustAllRestTemplate, enrichmentOrchestrator, meterRegistry);
     }
 
     private EmitterProperties buildDefaultProperties() {
@@ -449,7 +450,7 @@ class ForwardingEngineTest {
         @Test
         void enricherReturnsNull_forwardSkipped_noOpenhimCall() {
             stubFhirParse("Encounter", "enc-1");
-            when(resourceEnricher.enrichReferences(anyString())).thenReturn(null);
+            when(enrichmentOrchestrator.enrichReferences(anyString())).thenReturn(null);
 
             ForwardResult result = engine.forward("key", SAMPLE_JSON);
 
