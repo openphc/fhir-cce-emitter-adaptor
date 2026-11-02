@@ -38,10 +38,12 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew build
 
+    # Built from the repository Dockerfile rather than bootBuildImage: the image build no longer
+    # depends on Spring Boot's own Docker client, and the image keeps a shell for debugging.
     - name: Build container image
       run: |
         ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
-        ./gradlew bootBuildImage --imageName=${ECR_URI}:latest
+        docker build -t ${ECR_URI}:latest .
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
