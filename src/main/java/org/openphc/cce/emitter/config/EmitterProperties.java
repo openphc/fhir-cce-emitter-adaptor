@@ -229,10 +229,10 @@ public class EmitterProperties {
          * <p>Configurable via {@code EMITTER_PERSON_IDENTITY_REFERENCE_PATHS} (comma-separated).
          */
         private List<String> personIdentityReferencePaths = List.of(
-                "Encounter:participant.individual.reference",
-                "ServiceRequest:performer.reference",
-                "Observation:performer.reference",
-                "Patient:link.other.reference"
+                "Encounter:participant.individual",
+                "ServiceRequest:performer",
+                "Observation:performer",
+                "Patient:link.other"
 
         );
 
@@ -259,18 +259,43 @@ public class EmitterProperties {
         );
 
         /**
-         * Whether to enrich resources with location details from their referenced Encounter.
+         * Whether to derive location from Organization references at configured paths.
          *
-         * <p>When enabled, for resources that have an {@code encounter} reference field
-         * but no {@code location[]} array, the enricher fetches the referenced Encounter
-         * from the FHIR server and copies its {@code location[]} entries. For resources
-         * (including Encounter itself) that already have {@code location[]} entries with
-         * Location references missing a {@code display} field, the enricher fetches
-         * each Location from the FHIR server and populates the display name.
+         * <p>When enabled, the
+         * Organization-path approach is used: walks the configured
+         * {@code location-from-organization-paths} to find an Organization reference, fetches
+         * its display name, and sets the location field.
          *
-         * <p>Configurable via {@code EMITTER_LOCATION_ENRICHMENT_ENABLED}.
+         * <p>When disabled, the generic location enrichment flow is used instead:
+         * <ol>
+         *   <li>Location exists with display → skip</li>
+         *   <li>Location reference exists without display → fetch display from Location resource</li>
+         *   <li>No location → find Encounter reference at configured path, fetch Encounter,
+         *       extract its location data, and set on the payload</li>
+         * </ol>
+         *
+         * <p>Configurable via {@code EMITTER_LOCATION_ENRICHMENT_BASED_ON_ORGANIZATION_PATH}.
          */
-        private boolean locationEnrichmentEnabled = true;
+        private boolean locationEnrichmentBasedOnOrganizationPath = true;
+
+        /**
+         * Configurable JSON paths per resource type for locating the Encounter reference
+         * in the payload. Used by the generic location enrichment flow (when
+         * {@code location-enrichment-based-on-organization-path=false}) to find the Encounter
+         * whose location data should be copied to the incoming resource.
+         *
+         * <p>Each entry is {@code ResourceType:dot.separated.path}, e.g.
+         * {@code Observation:encounter} — the resolver walks to the {@code encounter}
+         * field and looks for a reference starting with {@code "Encounter/"}.
+         *
+         * <p>Configurable via {@code EMITTER_LOCATION_FROM_ENCOUNTER_PATHS} (comma-separated).
+         */
+        private List<String> locationFromEncounterPaths = List.of(
+                "Observation:encounter",
+                "ServiceRequest:encounter",
+                "Condition:encounter",
+                "MedicationRequest:encounter"
+        );
 
         /**
          * Configurable JSON paths per resource type for locating the Organization
@@ -284,11 +309,11 @@ public class EmitterProperties {
          * to {@code serviceProvider.reference} and extracts the Organization ID from
          * a value like {@code "Organization/1302"}.
          *
-         * <p>Configurable via {@code EMITTER_ORGANIZATION_LOCATION_PATHS} (comma-separated).
+         * <p>Configurable via {@code EMITTER_LOCATION_FROM_ORGANIZATION_PATHS} (comma-separated).
          */
-        private List<String> organizationLocationPaths = List.of(
-                "Encounter:serviceProvider.reference",
-                "ServiceRequest:performer.reference"
+        private List<String> locationFromOrganizationPaths = List.of(
+                "Encounter:serviceProvider",
+                "ServiceRequest:performer"
         );
     }
 }

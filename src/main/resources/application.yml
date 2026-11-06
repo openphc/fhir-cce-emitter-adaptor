@@ -62,10 +62,11 @@ emitter:
     national-id-system-suffix: ${EMITTER_NATIONAL_ID_SYSTEM_SUFFIX:/national-id}
     national-id-type-code: ${EMITTER_NATIONAL_ID_TYPE_CODE:NI}
     national-id-identifier-system: ${EMITTER_NATIONAL_ID_IDENTIFIER_SYSTEM:http://openphc.org/identifier/upid}
-    person-identity-reference-paths: ${EMITTER_PERSON_IDENTITY_REFERENCE_PATHS:Encounter:participant.individual.reference,ServiceRequest:performer.reference,Observation:performer.reference,Patient:link.other.reference}
+    person-identity-reference-paths: ${EMITTER_PERSON_IDENTITY_REFERENCE_PATHS:Encounter:participant.individual,ServiceRequest:performer,Observation:performer,Patient:link.other}
     practitioner-display-paths: ${EMITTER_PRACTITIONER_DISPLAY_PATHS:Encounter:participant.individual,Observation:performer,ServiceRequest:performer,Condition:asserter}
-    location-enrichment-enabled: ${EMITTER_LOCATION_ENRICHMENT_ENABLED:true}
-    organization-location-paths: ${EMITTER_ORGANIZATION_LOCATION_PATHS:Encounter:serviceProvider.reference,ServiceRequest:performer.reference}
+    location-enrichment-based-on-organization-path: ${EMITTER_LOCATION_ENRICHMENT_BASED_ON_ORGANIZATION_PATH:true}
+    location-from-organization-paths: ${EMITTER_LOCATION_FROM_ORGANIZATION_PATHS:Encounter:serviceProvider,ServiceRequest:performer}
+    location-from-encounter-paths: ${EMITTER_LOCATION_FROM_ENCOUNTER_PATHS:Observation:encounter,ServiceRequest:encounter,Condition:encounter,MedicationRequest:encounter}
 
 logging:
   level:
